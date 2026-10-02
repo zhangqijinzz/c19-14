@@ -83,6 +83,58 @@ export const findBoundsIssues = (field: FieldSize, elements: ExpoElement[]): Bou
     return overflow > 0 ? [{ elementId: element.id, overflow: Number(overflow.toFixed(1)) }] : [];
   });
 
+// 元素占位框（按旋转后的包围盒）能在场地内停留的最近位置。
+// 宽于/高于场地时退回到 0，保证至少有一条边贴在场内、仍然可见可抓。
+export const clampPositionToField = (x: number, y: number, width: number, height: number, field: FieldSize) => ({
+  x: Number(Math.min(Math.max(0, x), Math.max(0, field.width - width)).toFixed(1)),
+  y: Number(Math.min(Math.max(0, y), Math.max(0, field.height - height)).toFixed(1)),
+});
+
+// 就近把元素收回场内：只钳制越界的方向，尽量保留拖动前的位置意图。
+export const clampElementToField = (element: ExpoElement, field: FieldSize): ExpoElement => {
+  const box = getBoundingBox(element);
+  const position = clampPositionToField(box.left, box.top, box.width, box.height, field);
+  // 包围盒左上角即元素坐标（90° 旋转时 width/height 已交换）。
+  return { ...element, x: position.x, y: position.y };
+};
+
+// 批量收回：大元素优先，从左上角按行流式排布，并在已有元素之间扫描第一个不重叠的落点。
+export const recallOutOfBounds = (field: FieldSize, elements: ExpoElement[]): ExpoElement[] => {
+  const strayIds = new Set(findBoundsIssues(field, elements).map((issue) => issue.elementId));
+  if (strayIds.size === 0) return elements;
+
+  const placed = elements.filter((element) => !strayIds.has(element.id));
+
+  const boxesOverlap = (first: ReturnType<typeof getBoundingBox>, second: ReturnType<typeof getBoundingBox>) =>
+    first.left < second.right && first.right > second.left && first.top < second.bottom && first.bottom > second.top;
+
+  const findFreePosition = (element: ExpoElement) => {
+    const box = getBoundingBox(element);
+    const margin = 0.5;
+    const gap = 0.8;
+    const maxX = Math.max(0, field.width - box.width);
+    const maxY = Math.max(0, field.height - box.height);
+    for (let rowY = margin; rowY <= maxY; rowY = Number((rowY + gap).toFixed(1))) {
+      for (let colX = margin; colX <= maxX; colX = Number((colX + gap).toFixed(1))) {
+        const candidate = { left: colX, top: rowY, right: colX + box.width, bottom: rowY + box.height, width: box.width, height: box.height };
+        if (!placed.some((other) => boxesOverlap(candidate, getBoundingBox(other)))) {
+          return { x: Number(colX.toFixed(1)), y: Number(rowY.toFixed(1)) };
+        }
+      }
+    }
+    // 场地被占满时退回最近的边缘位置，至少保证元素在可见可抓的范围内。
+    return clampPositionToField(element.x, element.y, box.width, box.height, field);
+  };
+
+  return elements.map((element) => {
+    if (!strayIds.has(element.id)) return element;
+    const position = findFreePosition(element);
+    const recalled = { ...element, x: position.x, y: position.y };
+    placed.push(recalled);
+    return recalled;
+  });
+};
+
 export const findNarrowChannels = (elements: ExpoElement[]): ChannelIssue[] => {
   const issues: ChannelIssue[] = [];
   for (let i = 0; i < elements.length; i += 1) {

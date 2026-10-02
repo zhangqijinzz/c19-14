@@ -1,4 +1,4 @@
-import { createElement, createStarterDocument, analyzeLayout, findElement, getBoundingBox, normalizeRotation } from './domain';
+import { clampElementToField, clampPositionToField, createElement, createStarterDocument, analyzeLayout, findBoundsIssues, findElement, getBoundingBox, normalizeRotation, recallOutOfBounds } from './domain';
 import type { LayoutRepository } from './repository';
 import type { Analysis, ElementKind, LayoutDocument, LayoutMode, Notice, RenderElement, ViewPhase } from './types';
 
@@ -74,22 +74,62 @@ export class ExpoSketchViewModel {
   }
 
   moveElement(id: string, x: number, y: number) {
-    const elements = this.stateValue.document.elements.map((element) => element.id === id ? { ...element, x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) } : element);
+    const field = this.stateValue.document.field;
+    const elements = this.stateValue.document.elements.map((element) => {
+      if (element.id !== id) return element;
+      // 硬约束：拖动过程中元素始终留在场地内，避免被画布边缘裁切后无法抓回。
+      const box = getBoundingBox(element);
+      const position = clampPositionToField(x, y, box.width, box.height, field);
+      return { ...element, x: position.x, y: position.y };
+    });
     this.commitAndPersist({ document: { ...this.stateValue.document, elements } });
   }
 
   resizeSelected(width: number, height: number) {
     const id = this.stateValue.selectedId;
-    if (!id || width <= 0 || height <= 0) return;
-    const elements = this.stateValue.document.elements.map((element) => element.id === id ? { ...element, width: Number(width.toFixed(1)), height: Number(height.toFixed(1)) } : element);
+    if (!id || !(width > 0) || !(height > 0)) return;
+    const field = this.stateValue.document.field;
+    const elements = this.stateValue.document.elements.map((element) => {
+      if (element.id !== id) return element;
+      // 尺寸变化后把左上角拉回场内，防止新尺寸把元素顶出边界。
+      const resized = { ...element, width: Number(width.toFixed(1)), height: Number(height.toFixed(1)) };
+      return clampElementToField(resized, field);
+    });
     this.commitAndPersist({ document: { ...this.stateValue.document, elements } });
   }
 
   rotateSelected() {
     const id = this.stateValue.selectedId;
     if (!id) return;
-    const elements = this.stateValue.document.elements.map((element) => element.id === id ? { ...element, rotation: normalizeRotation(element.rotation + 90) } : element);
+    const field = this.stateValue.document.field;
+    const elements = this.stateValue.document.elements.map((element) => {
+      if (element.id !== id) return element;
+      // 绕中心旋转，旋转后若包围盒越界则整体收回。
+      const before = getBoundingBox(element);
+      const center = { x: before.left + before.width / 2, y: before.top + before.height / 2 };
+      const rotated = { ...element, rotation: normalizeRotation(element.rotation + 90) };
+      const after = getBoundingBox(rotated);
+      return clampElementToField({ ...rotated, x: center.x - after.width / 2, y: center.y - after.height / 2 }, field);
+    });
     this.commitAndPersist({ document: { ...this.stateValue.document, elements }, notice: { tone: 'info', message: '方向已旋转 90°' } });
+  }
+
+  // 单个越界元素就近收回（只钳越界方向，保留原位置意图）。
+  reclaimElement(id: string) {
+    const field = this.stateValue.document.field;
+    const target = findElement(this.stateValue.document, id);
+    if (!target || findBoundsIssues(field, [target]).length === 0) return;
+    const elements = this.stateValue.document.elements.map((element) => element.id === id ? clampElementToField(element, field) : element);
+    this.commitAndPersist({ document: { ...this.stateValue.document, elements }, selectedId: id, notice: { tone: 'success', message: `${target.name} 已收回场地内` } });
+  }
+
+  // 一键收回全部越界元素，自动避开场内已有元素。
+  reclaimAllOutOfBounds() {
+    const field = this.stateValue.document.field;
+    const count = findBoundsIssues(field, this.stateValue.document.elements).length;
+    if (count === 0) return;
+    const elements = recallOutOfBounds(field, this.stateValue.document.elements);
+    this.commitAndPersist({ document: { ...this.stateValue.document, elements }, notice: { tone: 'success', message: `已将 ${count} 个越界元素收回场地` } });
   }
 
   renameSelected(name: string) {
