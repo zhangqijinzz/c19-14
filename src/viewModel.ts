@@ -1,4 +1,4 @@
-import { createElement, createStarterDocument, analyzeLayout, findElement, getBoundingBox, normalizeRotation } from './domain';
+import { createElement, createStarterDocument, analyzeLayout, clampElementToField, findBoundsIssues, findElement, getBoundingBox, normalizeRotation, reclaimOutOfBounds } from './domain';
 import type { LayoutRepository } from './repository';
 import type { Analysis, ElementKind, LayoutDocument, LayoutMode, Notice, RenderElement, ViewPhase } from './types';
 
@@ -74,21 +74,45 @@ export class ExpoSketchViewModel {
   }
 
   moveElement(id: string, x: number, y: number) {
-    const elements = this.stateValue.document.elements.map((element) => element.id === id ? { ...element, x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) } : element);
+    const field = this.stateValue.document.field;
+    const elements = this.stateValue.document.elements.map((element) => {
+      if (element.id !== id) return element;
+      const box = getBoundingBox(element);
+      const maxX = box.width >= field.width ? 0 : Math.max(0, field.width - box.width);
+      const maxY = box.height >= field.height ? 0 : Math.max(0, field.height - box.height);
+      return { ...element, x: Number(Math.min(Math.max(x, 0), maxX).toFixed(1)), y: Number(Math.min(Math.max(y, 0), maxY).toFixed(1)) };
+    });
     this.commitAndPersist({ document: { ...this.stateValue.document, elements } });
+  }
+
+  // 收回越界元素；ids 为空时收回全部。元素收回后仍保持选中，便于继续调整
+  reclaimElements(ids?: string[]) {
+    const { field, elements } = this.stateValue.document;
+    const targetIds = ids ?? findBoundsIssues(field, elements).map((issue) => issue.elementId);
+    if (targetIds.length === 0) return;
+    const next = reclaimOutOfBounds(elements, field, targetIds);
+    const selectedId = targetIds.includes(this.stateValue.selectedId ?? '') ? this.stateValue.selectedId : targetIds[0];
+    const message = targetIds.length === 1 ? '元素已收回场地' : `已将 ${targetIds.length} 个越界元素收回场地`;
+    this.commitAndPersist({ document: { ...this.stateValue.document, elements: next }, selectedId, notice: { tone: 'success', message } });
   }
 
   resizeSelected(width: number, height: number) {
     const id = this.stateValue.selectedId;
     if (!id || width <= 0 || height <= 0) return;
-    const elements = this.stateValue.document.elements.map((element) => element.id === id ? { ...element, width: Number(width.toFixed(1)), height: Number(height.toFixed(1)) } : element);
+    const field = this.stateValue.document.field;
+    const elements = this.stateValue.document.elements.map((element) => element.id === id
+      ? clampElementToField({ ...element, width: Number(width.toFixed(1)), height: Number(height.toFixed(1)) }, field)
+      : element);
     this.commitAndPersist({ document: { ...this.stateValue.document, elements } });
   }
 
   rotateSelected() {
     const id = this.stateValue.selectedId;
     if (!id) return;
-    const elements = this.stateValue.document.elements.map((element) => element.id === id ? { ...element, rotation: normalizeRotation(element.rotation + 90) } : element);
+    const field = this.stateValue.document.field;
+    const elements = this.stateValue.document.elements.map((element) => element.id === id
+      ? clampElementToField({ ...element, rotation: normalizeRotation(element.rotation + 90) }, field)
+      : element);
     this.commitAndPersist({ document: { ...this.stateValue.document, elements }, notice: { tone: 'info', message: '方向已旋转 90°' } });
   }
 
@@ -101,7 +125,10 @@ export class ExpoSketchViewModel {
 
   resizeField(width: number, height: number) {
     if (width < 12 || height < 10) return;
-    this.commitAndPersist({ document: { ...this.stateValue.document, field: { width: Number(width.toFixed(1)), height: Number(height.toFixed(1)) } }, notice: { tone: 'success', message: '场地尺寸已更新' } });
+    const field = { width: Number(width.toFixed(1)), height: Number(height.toFixed(1)) };
+    // 场地缩小时把元素一并夹回新边界，避免新产生的越界
+    const elements = this.stateValue.document.elements.map((element) => clampElementToField(element, field));
+    this.commitAndPersist({ document: { ...this.stateValue.document, field, elements }, notice: { tone: 'success', message: '场地尺寸已更新' } });
   }
 
   renameProject(title: string) {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createStarterDocument } from '../src/domain';
+import { createStarterDocument, findBoundsIssues } from '../src/domain';
 import type { LayoutRepository } from '../src/repository';
 import type { LayoutDocument } from '../src/types';
 import { ExpoSketchViewModel } from '../src/viewModel';
@@ -50,5 +50,29 @@ describe('ExpoSketchViewModel', () => {
     const before = vm.state.document.elements[0].width;
     vm.resizeSelected(0, 0);
     expect(vm.state.document.elements[0].width).toBe(before);
+  });
+
+  it('keeps dragged elements inside the field even when pushed beyond the edges', () => {
+    const vm = new ExpoSketchViewModel(fakeRepository());
+    const field = vm.state.document.field;
+    vm.moveElement('stage-1', -50, 999);
+    const stage = vm.state.document.elements.find((element) => element.id === 'stage-1');
+    expect(stage).toBeDefined();
+    expect(stage!.x).toBe(0);
+    expect(stage!.y).toBe(field.height - 4);
+    expect(vm.state.analysis.bounds).toHaveLength(0);
+  });
+
+  it('reclaims every overflowing element in one action and keeps them selectable', () => {
+    const vm = new ExpoSketchViewModel(fakeRepository());
+    const field = vm.state.document.field;
+    const target = vm.state.document.elements[0];
+    const overflowed = { ...target, x: field.width + 5, y: field.height + 5 };
+    const harness = vm as unknown as { stateValue: { document: typeof vm.state.document } };
+    harness.stateValue.document = { ...vm.state.document, elements: vm.state.document.elements.map((element) => element.id === overflowed.id ? overflowed : element) };
+    expect(findBoundsIssues(field, harness.stateValue.document.elements).length).toBeGreaterThan(0);
+    vm.reclaimElements();
+    expect(vm.state.analysis.bounds).toHaveLength(0);
+    expect(vm.state.selectedId).toBe(overflowed.id);
   });
 });
